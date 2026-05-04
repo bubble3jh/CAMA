@@ -4,8 +4,6 @@ Anonymous code submission accompanying the paper *CAMA: Corruption-Aware Margina
 
 > **Note.** Author identifiers, internal experiment IDs, and project-specific paths have been stripped for double-blind review. All numbers below come from the camera-ready hyperparameters; reproducing them requires the same datasets and CLIP weights described in the *Setup* section.
 
-> ⚠️ **Reproducibility-critical: pin `open_clip_torch==2.20.0`.** OpenAI's ViT-B/16 checkpoint uses QuickGELU activations. `open_clip_torch` releases newer than 2.20.0 default to GELU and silently load the same weights against the wrong activation, dropping zero-shot CIFAR-10-C accuracy by roughly 3pp and shifting every adapted number downstream. The pinned version is in `requirements.txt`; if you build the environment manually, double-check `python -c "import open_clip; print(open_clip.__version__)"` reports `2.20.0` before running anything.
-
 ---
 
 ## 1. Overview
@@ -77,7 +75,11 @@ conda activate cama
 pip install -r requirements.txt
 ```
 
-`open_clip_torch` must be pinned to **2.20.0**: later releases default to GELU activations whereas the OpenAI ViT-B/16 checkpoint is QuickGELU; mixing them changes the zero-shot baseline by approximately -3pp.
+**Reproducibility-critical: `open_clip_torch` must be pinned to `2.20.0`.** OpenAI's ViT-B/16 checkpoint uses QuickGELU activations; `open_clip_torch` releases newer than 2.20.0 default to GELU and silently load the same weights against the wrong activation, dropping zero-shot CIFAR-10-C accuracy by roughly 3pp and shifting every adapted number downstream. The pin is already in `requirements.txt`; verify before running anything:
+
+```bash
+python -c "import open_clip; print(open_clip.__version__)"   # must print 2.20.0
+```
 
 ### 3.2 Data
 
