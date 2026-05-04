@@ -4,6 +4,8 @@ Anonymous code submission accompanying the paper *CAMA: Corruption-Aware Margina
 
 > **Note.** Author identifiers, internal experiment IDs, and project-specific paths have been stripped for double-blind review. All numbers below come from the camera-ready hyperparameters; reproducing them requires the same datasets and CLIP weights described in the *Setup* section.
 
+> ⚠️ **Reproducibility-critical: pin `open_clip_torch==2.20.0`.** OpenAI's ViT-B/16 checkpoint uses QuickGELU activations. `open_clip_torch` releases newer than 2.20.0 default to GELU and silently load the same weights against the wrong activation, dropping zero-shot CIFAR-10-C accuracy by roughly 3pp and shifting every adapted number downstream. The pinned version is in `requirements.txt`; if you build the environment manually, double-check `python -c "import open_clip; print(open_clip.__version__)"` reports `2.20.0` before running anything.
+
 ---
 
 ## 1. Overview
@@ -120,7 +122,7 @@ Expected runtime on a single RTX 3090: under one minute. Final online accuracy s
 
 ## 4. Reproducing the main table
 
-The reported numbers in the paper come from the fixed hyperparameter pair `(zeta, kappa) = (0.05, 0.1)` applied uniformly across all three benchmarks. Per-dataset settings (batch size, learning rate, weight decay, optimizer, calibration batches) are set in `cfgs/<dataset>/ours.yaml` and additionally in `_CFGS` in `main_cama.py`; CLI flags override either layer.
+The reported numbers in the paper come from a single fixed hyperparameter pair `(zeta, kappa) = (0.05, 0.1)` applied uniformly across all three benchmarks. Per-dataset settings (batch size, learning rate, weight decay, optimizer, calibration batches) live in `cfgs/<dataset>/ours.yaml` and the `_CFGS` table in `main_cama.py`; CLI flags override either layer.
 
 > **Note on YAML usage.** When invoked through `main_cama.py`, the YAML config supplies only `CORRUPTION.DATASET`, `CORRUPTION.TYPE`, and `DATA_DIR`; per-method optimizer / learning-rate / batch-size defaults live in the `_CFGS` table inside `main_cama.py` (overridable via CLI flags such as `--lr`, `--wd`, `--batch-size`). The same YAML, when invoked through `test_time.py`, drives the full BATCLIP-style pipeline including `MODEL.ADAPTATION` registry dispatch.
 
@@ -188,8 +190,6 @@ python -c "import pandas as pd; df = pd.read_csv('outputs/cama_c10/main_table/ci
 | Adapted parameters | LayerNorm affine in both encoders | (same) | (same) |
 | Adaptation | episodic per corruption, 1 step per batch | (same) | (same) |
 | Mixed precision | autocast + scaler init=1000 | (same) | (same) |
-
-`(zeta, kappa) = (0.05, 0.1)` was selected from a 3x3 grid `{0.05, 0.1, 0.2} x {0.1, 0.3, 0.5}` as the single fixed pair that performs robustly across all three benchmarks; the chosen pair is within 0.11pp of the per-(K, corruption) oracle on every benchmark.
 
 ---
 

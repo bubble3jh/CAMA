@@ -16,17 +16,17 @@ Phase 2 (online adaptation):
 Usage examples
 --------------
 # CIFAR-10-C main run
-python main_cama.py --dataset cifar10_c --phase main \\
+python main_cama.py --dataset cifar10_c \\
     --output-dir outputs/cama_c10 \\
     --cfg cfgs/cifar10_c/ours.yaml DATA_DIR ./data
 
 # CIFAR-100-C with weight decay 0
-python main_cama.py --dataset cifar100_c --phase main --wd 0.0 \\
+python main_cama.py --dataset cifar100_c --wd 0.0 \\
     --output-dir outputs/cama_c100 \\
     --cfg cfgs/cifar100_c/ours.yaml DATA_DIR ./data
 
 # ImageNet-C subset smoke test
-python main_cama.py --dataset imagenet_c --phase main \\
+python main_cama.py --dataset imagenet_c \\
     --corruptions gaussian_noise,defocus_blur \\
     --output-dir outputs/cama_inc_smoke \\
     --cfg cfgs/imagenet_c/ours.yaml DATA_DIR ./data
@@ -78,7 +78,6 @@ DATASET     = _pop_arg(sys.argv, "--dataset")
 OUTPUT_DIR  = _pop_arg(sys.argv, "--output-dir")
 
 # Optional
-PHASE       = _pop_arg(sys.argv, "--phase",       default="main")
 SEED        = _pop_arg(sys.argv, "--seed",        default=1,    cast=int)
 CORR_OVERRIDE = _pop_arg(sys.argv, "--corruptions")
 
@@ -98,7 +97,6 @@ _STREAM_OVR = _pop_arg(sys.argv, "--streaming")              # auto | true | fal
 # CAMA hyperparameters
 _ALPHA_OVR  = _pop_arg(sys.argv, "--alpha",       cast=float)
 _BETA_OVR   = _pop_arg(sys.argv, "--beta",        cast=float)
-_PRIOR_OVR  = _pop_arg(sys.argv, "--prior")                  # harmonic | uniform | softmax
 
 # Optional outputs / features
 SAVE_EMB         = _pop_flag(sys.argv, "--save-embeddings")
@@ -110,30 +108,17 @@ if DATASET is None:
     raise SystemExit("ERROR: --dataset required  (cifar10_c | cifar100_c | imagenet_c)")
 if OUTPUT_DIR is None:
     raise SystemExit("ERROR: --output-dir required")
-_VALID_DATASETS = ("cifar10_c", "cifar100_c", "imagenet_c", "cifar10_c_lt", "cifar100_c_lt")
+_VALID_DATASETS = ("cifar10_c", "cifar100_c", "imagenet_c")
 if DATASET not in _VALID_DATASETS:
     raise SystemExit(f"ERROR: unknown dataset '{DATASET}'")
-if PHASE not in ("main", "ablation_pi", "ablation_comp", "analysis"):
-    raise SystemExit(f"ERROR: unknown phase '{PHASE}'")
-_ABL_OK = ("cifar10_c", "cifar10_c_lt", "cifar100_c_lt")
-if PHASE in ("ablation_pi", "ablation_comp") and DATASET not in _ABL_OK:
-    raise SystemExit(f"ERROR: ablation phases only run on {_ABL_OK}")
-if PHASE == "analysis" and DATASET == "imagenet_c":
-    raise SystemExit("ERROR: analysis phase requires full-tensor eval (CIFAR only)")
 if _OPT_OVR is not None and _OPT_OVR not in ("adam", "adamw"):
     raise SystemExit(f"ERROR: --optimizer must be 'adam' or 'adamw', got '{_OPT_OVR}'")
 if _STREAM_OVR is not None and _STREAM_OVR not in ("auto", "true", "false"):
     raise SystemExit(f"ERROR: --streaming must be 'auto' | 'true' | 'false'")
-if _PRIOR_OVR is not None and _PRIOR_OVR not in ("harmonic", "uniform", "softmax"):
-    raise SystemExit(f"ERROR: --prior must be 'harmonic' | 'uniform' | 'softmax'")
 
 
 # ── repo path setup ───────────────────────────────────────────────────────────
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT   = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-BATCLIP_DIR = os.path.join(REPO_ROOT, "experiments/baselines/BATCLIP/classification")
-sys.path.insert(0, BATCLIP_DIR)
-sys.path.insert(0, REPO_ROOT)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 from conf import cfg, load_cfg_from_args                      # noqa: E402
@@ -200,7 +185,7 @@ else:
 
 ALPHA       = _ALPHA_OVR if _ALPHA_OVR is not None else 0.1
 BETA        = _BETA_OVR  if _BETA_OVR  is not None else 0.3
-PRIOR_MAIN  = _PRIOR_OVR if _PRIOR_OVR is not None else "harmonic"
+PRIOR_MAIN  = "harmonic"
 
 _ALL_CORRUPTIONS_DEFAULT = [
     "gaussian_noise", "shot_noise", "impulse_noise",
@@ -1101,326 +1086,12 @@ def run_main(model, state_init, preprocess, device, out_dir):
     return all_results, cama_trajectory
 
 
-# ── Phase: analysis (regenerate per-corruption analysis from LN checkpoints) ──
-# Why: main phase SKIP path preserved main_table JSON but not analysis rows, so
-# exp4_equilibrium.csv was overwritten to only contain the last-session's
-# corruption. This phase rebuilds all 15 rows using saved ckpts (no re-adapt).
-def run_analysis(model, state_init, preprocess, device, out_dir):
-    out_main     = os.path.join(out_dir, "main_table", f"k{K}")
-    out_analysis = os.path.join(out_dir, "analysis",   f"k{K}")
-    ckpt_dir     = os.path.join(out_dir, "checkpoints", f"k{K}")
-    os.makedirs(out_analysis, exist_ok=True)
-
-    logger.info("Loading clean test set for cos_clean...")
-    imgs_clean, _ = load_clean_tensor(preprocess)
-    model.load_state_dict(copy.deepcopy(state_init))
-    model.eval()
-    with torch.no_grad():
-        _, clean_feats_all = collect_features_tensor(model, imgs_clean, device)
-    cos_clean_val = pairwise_cosine_mean(clean_feats_all.cpu().float())
-    logger.info(f"  cos_clean = {cos_clean_val:.5f}")
-    del clean_feats_all, imgs_clean
-    torch.cuda.empty_cache()
-
-    analysis_rows = []
-    all_results   = []
-    for corr_idx, corruption in enumerate(ALL_CORRUPTIONS):
-        main_json = os.path.join(out_main, f"{corruption}.json")
-        ana_json  = os.path.join(out_analysis, f"{corruption}_analysis.json")
-        ckpt_path = os.path.join(ckpt_dir, f"{corruption}_ln.pt")
-
-        if not os.path.exists(main_json):
-            logger.info(f"[SKIP] {corruption}: missing {main_json}")
-            continue
-        with open(main_json) as f:
-            mr = json.load(f)
-        all_results.append(mr)
-
-        if os.path.exists(ana_json):
-            logger.info(f"[CACHED] {corruption}: {ana_json}")
-            with open(ana_json) as f:
-                analysis_rows.append(json.load(f))
-            continue
-
-        if not os.path.exists(ckpt_path):
-            logger.info(f"[SKIP] {corruption}: missing LN ckpt {ckpt_path}")
-            continue
-
-        logger.info(f"\n[{corr_idx+1}/{len(ALL_CORRUPTIONS)}] {corruption}  recomputing analysis")
-        model.load_state_dict(copy.deepcopy(state_init))
-        configure_model(model)
-
-        imgs_corrupt, labels_corrupt = load_tensor(corruption, preprocess)
-        cal_batches = [imgs_corrupt[i*BS:(i+1)*BS] for i in range(N_CAL)]
-
-        pi, lam0, lam_eff, d_eff_val, _, _, corrupt_feats_cal, _, _ = calibrate(
-            model, cal_batches, device, prior_type=PRIOR_MAIN)
-
-        ln_state = torch.load(ckpt_path, map_location=device)
-        with torch.no_grad():
-            own = dict(model.named_parameters())
-            for name, val in ln_state.items():
-                if name in own:
-                    own[name].data.copy_(val.to(device))
-
-        anrow = collect_analysis_metrics(
-            model, corruption, pi,
-            lam0, lam_eff, d_eff_val,
-            corrupt_feats_cal,
-            imgs_corrupt, labels_corrupt,
-            cos_clean_val,
-            device,
-        )
-        analysis_rows.append(anrow)
-        with open(ana_json, "w") as f:
-            json.dump(anrow, f, indent=2)
-        logger.info(f"  spearman={anrow['spearman_r']}  saved {os.path.basename(ana_json)}")
-
-        del imgs_corrupt, labels_corrupt, cal_batches, corrupt_feats_cal
-        torch.cuda.empty_cache()
-
-    if analysis_rows:
-        eq_path = os.path.join(out_analysis, "exp4_equilibrium.csv")
-        fields_eq = [
-            "corruption", "spearman_r", "pearson_r", "lambda_0", "d_eff", "lambda_eff",
-            "cos_clean", "cos_corrupt", "cos_adapted", "cone_opened",
-            "u_soft_hard_gap", "mean_entropy_adapted", "cat_pct",
-        ]
-        with open(eq_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields_eq)
-            w.writeheader()
-            w.writerows(analysis_rows)
-        logger.info(f"Saved: {eq_path}  ({len(analysis_rows)} rows)")
-
-        lam_path = os.path.join(out_analysis, "lambda_table.csv")
-        with open(lam_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["corruption", "family", "lambda_0", "d_eff", "lambda_eff"])
-            w.writeheader()
-            for r in all_results:
-                w.writerow({
-                    "corruption": r["corruption"],
-                    "family":     CORRUPTION_FAMILY.get(r["corruption"], ""),
-                    "lambda_0":   r.get("lambda_0", ""),
-                    "d_eff":      r.get("d_eff", ""),
-                    "lambda_eff": r.get("lambda_eff", ""),
-                })
-        logger.info(f"Saved: {lam_path}")
-
-
-# ── Phase: π design ablation (CIFAR-10-C, gaussian_noise only) ────────────────
-def run_ablation_pi(model, state_init, preprocess, device, out_dir):
-    out_abl = os.path.join(out_dir, "ablation", f"k{K}")
-    os.makedirs(out_abl, exist_ok=True)
-    out_csv = os.path.join(out_abl, "pi_ablation.csv")
-
-    corruption = "gaussian_noise"
-    imgs, labels = load_tensor(corruption, preprocess)
-    cal_batches  = [imgs[i*BS:(i+1)*BS] for i in range(N_CAL)]
-    n_steps      = N_TOTAL // BS
-
-    rows = []
-    for prior_type in ("uniform", "softmax"):
-        logger.info(f"\n{'='*40}\n  π ablation: {prior_type}\n{'='*40}")
-        model.load_state_dict(copy.deepcopy(state_init))
-        configure_model(model)
-        optimizer = make_optimizer(model)
-        scaler    = torch.cuda.amp.GradScaler(init_scale=1000)
-
-        pi, lam0, lam_eff, d_eff_val, *_ = calibrate(
-            model, cal_batches, device, prior_type=prior_type)
-        logger.info(f"  λ₀={lam0:.4f}  d_eff={d_eff_val:.4f}  λ_eff={lam_eff:.4f}")
-
-        loop_result, _ = adapt_one(
-            model, optimizer, scaler,
-            _TensorIter(imgs, labels, BS), n_steps,
-            pi, lam_eff, device,
-            corruption, 0, 1,
-        )
-        offline_acc = offline_eval_tensor(model, imgs, labels, device)
-        rows.append({
-            "variant":     prior_type,
-            "lambda_0":    round(lam0, 5),
-            "d_eff":       round(d_eff_val, 5),
-            "lambda_eff":  round(lam_eff, 5),
-            "online_acc":  loop_result["online_acc"],
-            "offline_acc": round(offline_acc, 5),
-        })
-        logger.info(f"  online={loop_result['online_acc']:.4f}  offline={offline_acc:.5f}")
-        del optimizer, scaler
-        torch.cuda.empty_cache()
-
-    # borrow harmonic result from main table if available
-    main_json = os.path.join(out_dir, "main_table", f"k{K}", f"{corruption}.json")
-    if os.path.exists(main_json):
-        with open(main_json) as f:
-            mr = json.load(f)
-        rows.append({
-            "variant":     "harmonic",
-            "lambda_0":    mr.get("lambda_0", ""),
-            "d_eff":       mr.get("d_eff", ""),
-            "lambda_eff":  mr.get("lambda_eff", ""),
-            "online_acc":  mr.get("online_acc", ""),
-            "offline_acc": mr.get("offline_acc", ""),
-        })
-
-    with open(out_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["variant","lambda_0","d_eff","lambda_eff","online_acc","offline_acc"])
-        w.writeheader()
-        w.writerows(rows)
-    logger.info(f"Saved: {out_csv}")
-
-
-# ── Phase: component ablation (CIFAR-10-C, gaussian_noise only) ───────────────
-def run_ablation_comp(model, state_init, preprocess, device, out_dir):
-    out_abl = os.path.join(out_dir, "ablation", f"k{K}")
-    os.makedirs(out_abl, exist_ok=True)
-    out_csv = os.path.join(out_abl, "component_ablation.csv")
-
-    corruption = "gaussian_noise"
-    imgs, labels = load_tensor(corruption, preprocess)
-    cal_batches  = [imgs[i*BS:(i+1)*BS] for i in range(N_CAL)]
-    n_steps      = N_TOTAL // BS
-
-    rows = []
-    out_traj_dir = os.path.join(out_abl, "trajectories")
-    os.makedirs(out_traj_dir, exist_ok=True)
-
-    for variant_name, pi_type, loss_mode in [
-        ("MI_only",      "uniform",  "mi_only"),
-        ("KL_only",      "harmonic", "kl_only"),
-        ("CAMA_uniform", "uniform",  "cama_uniform"),
-    ]:
-        logger.info(f"\n{'='*40}\n  Component ablation: {variant_name}\n{'='*40}")
-        model.load_state_dict(copy.deepcopy(state_init))
-        configure_model(model)
-        optimizer = make_optimizer(model)
-        scaler    = torch.cuda.amp.GradScaler(init_scale=1000)
-
-        pi, lam0, lam_eff, d_eff_val, *_ = calibrate(
-            model, cal_batches, device, prior_type=pi_type)
-
-        lam_use = 1.0 if loss_mode == "mi_only" else lam_eff
-        logger.info(f"  λ_use={lam_use:.4f}  d_eff={d_eff_val:.4f}  pi={pi_type}")
-
-        cum_corr = cum_seen = 0
-        pred_counts = torch.zeros(K, dtype=torch.long)
-        H_pbar_last = 0.0
-        cat_pct_last = 0.0
-        killed = False
-        kill_step = n_steps // 2
-        traj_rows = []
-        t0 = time.time()
-        for step, (imgs_b, labels_b) in enumerate(_TensorIter(imgs, labels, BS)):
-            if step >= n_steps:
-                break
-            optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                out    = model(imgs_b.to(device), return_features=True)
-                logits = out[0]
-                q      = F.softmax(logits, dim=1)
-                mean_H = -(q * (q + 1e-8).log()).sum(1).mean()
-                p_bar  = q.mean(0)
-                H_pbar = -(p_bar * (p_bar + 1e-8).log()).sum()
-                I_batch = H_pbar - mean_H
-
-                if loss_mode == "mi_only":
-                    loss = -I_batch
-                elif loss_mode == "kl_only":
-                    kl   = (p_bar * ((p_bar + 1e-8).log() - (pi + 1e-8).log())).sum()
-                    loss = lam_use * kl
-                elif loss_mode == "cama_uniform":
-                    pi_u  = torch.ones(K, device=device) / K
-                    pdag  = p_dag(pi_u, lam_use)
-                    kl_d  = (p_bar * ((p_bar + 1e-8).log() - (pdag + 1e-8).log())).sum()
-                    loss  = -I_batch + (lam_use - 1.0) * kl_d
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            with torch.no_grad():
-                preds        = logits.argmax(1)
-                cum_corr    += (preds == labels_b.to(device)).sum().item()
-                cum_seen    += len(labels_b)
-                pred_counts += preds.cpu().bincount(minlength=K)
-                H_pbar_last  = float(H_pbar.detach())
-                cat_pct_last = pred_counts.max().item() / cum_seen
-
-            online_acc_running = cum_corr / cum_seen
-            traj_rows.append({
-                "step": step,
-                "online_acc": round(online_acc_running, 5),
-                "cat_pct":    round(cat_pct_last, 5),
-                "H_pbar":     round(H_pbar_last, 5),
-                "I_batch":    round(float(I_batch.detach()), 5),
-            })
-            if (step + 1) == kill_step and online_acc_running < KILL_THRESH:
-                killed = True
-
-        online_acc  = cum_corr / cum_seen
-        offline_acc, overconf_wrong, ece = offline_eval_detailed(
-            model, imgs, labels, device)
-
-        # Save per-step trajectory
-        traj_csv = os.path.join(out_traj_dir, f"{variant_name}.csv")
-        with open(traj_csv, "w", newline="") as tf:
-            tw = csv.DictWriter(tf, fieldnames=["step","online_acc","cat_pct","H_pbar","I_batch"])
-            tw.writeheader()
-            tw.writerows(traj_rows)
-
-        rows.append({
-            "variant":        variant_name,
-            "lambda_eff":     round(lam_use, 5),
-            "d_eff":          round(d_eff_val, 5),
-            "pi_type":        pi_type,
-            "online_acc":     round(online_acc, 5),
-            "offline_acc":    round(offline_acc, 5),
-            "cat_pct":        round(cat_pct_last, 5),
-            "H_pbar":         round(H_pbar_last, 5),
-            "killed":         killed,
-            "overconf_wrong": round(overconf_wrong, 5),
-            "ece":            round(ece, 5),
-        })
-        logger.info(
-            f"  online={online_acc:.4f}  offline={offline_acc:.5f}  "
-            f"cat%={cat_pct_last:.3f}  H(p̄)={H_pbar_last:.3f}  "
-            f"ECE={ece:.4f}  killed={killed}")
-        del optimizer, scaler
-        torch.cuda.empty_cache()
-
-    # borrow full CAMA result from main table (now with full diagnostics)
-    main_json = os.path.join(out_dir, "main_table", f"k{K}", f"{corruption}.json")
-    if os.path.exists(main_json):
-        with open(main_json) as f:
-            mr = json.load(f)
-        rows.append({
-            "variant":        "CAMA_full",
-            "lambda_eff":     mr.get("lambda_eff", ""),
-            "d_eff":          mr.get("d_eff", ""),
-            "pi_type":        "harmonic",
-            "online_acc":     mr.get("online_acc", ""),
-            "offline_acc":    mr.get("offline_acc", ""),
-            "cat_pct":        mr.get("cat_pct", ""),
-            "H_pbar":         mr.get("H_pbar", ""),
-            "killed":         mr.get("killed", ""),
-            "overconf_wrong": mr.get("overconf_wrong", ""),
-            "ece":            mr.get("ece", ""),
-        })
-
-    fieldnames = ["variant","lambda_eff","d_eff","pi_type","online_acc","offline_acc",
-                  "cat_pct","H_pbar","killed","overconf_wrong","ece"]
-    with open(out_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(rows)
-    logger.info(f"Saved: {out_csv}")
-
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def _banner():
     return (
         f"CAMA canonical runner\n"
-        f"  dataset = {DATASET}   phase = {PHASE}\n"
+        f"  dataset = {DATASET}\n"
         f"  K = {K}  BS = {BS}  LR = {LR}  WD = {WD}  opt = {OPT_TYPE}\n"
         f"  N_TOTAL = {N_TOTAL}  N_CAL = {N_CAL}  SEVERITY = {SEVERITY}\n"
         f"  STREAMING = {STREAMING}  KILL_THRESH = {KILL_THRESH}  DIAG_INTERVAL = {DIAG_INTERVAL}\n"
@@ -1432,7 +1103,7 @@ def _banner():
 
 
 def main():
-    desc = f"main_CAMA  dataset={DATASET}  phase={PHASE}"
+    desc = f"CAMA  dataset={DATASET}"
     load_cfg_from_args(desc)
 
     torch.manual_seed(SEED)
@@ -1457,14 +1128,7 @@ def main():
     state_init = copy.deepcopy(model.state_dict())
 
     t_start = time.time()
-    if PHASE == "main":
-        run_main(model, state_init, preprocess, device, OUTPUT_DIR)
-    elif PHASE == "ablation_pi":
-        run_ablation_pi(model, state_init, preprocess, device, OUTPUT_DIR)
-    elif PHASE == "ablation_comp":
-        run_ablation_comp(model, state_init, preprocess, device, OUTPUT_DIR)
-    elif PHASE == "analysis":
-        run_analysis(model, state_init, preprocess, device, OUTPUT_DIR)
+    run_main(model, state_init, preprocess, device, OUTPUT_DIR)
 
     elapsed = time.time() - t_start
     logger.info(f"\nDone. Total: {elapsed/60:.1f} min  ({datetime.now().isoformat()})")

@@ -9,7 +9,6 @@ mkdir -p "$OUT"
 
 python main_cama.py \
     --dataset cifar100_c \
-    --phase main \
     --wd 0.0 \
     --output-dir "$OUT" \
     --alpha 0.05 \
