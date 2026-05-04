@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+
+# Datasets and checkpoints
+data/
+ckpt/
+*.npz
+*.npy
+*.pt
+*.pth
+*.tar.gz
+
+# Outputs
+outputs/
+output/
+runs/
+wandb/
+*.log
+*.txt~
+log.txt
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+venv/
+env/

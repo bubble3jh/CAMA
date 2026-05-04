@@ -1,0 +1,23 @@
+# Core ML stack
+torch>=2.0,<2.4
+torchvision>=0.15
+
+# CLIP — pin to 2.20.0; later releases default to GELU and break QuickGELU
+# OpenAI checkpoints (~3pp accuracy regression on CIFAR-10-C zero-shot).
+open_clip_torch==2.20.0
+
+# Backbone utilities
+timm>=0.9
+robustbench  # if installing from PyPI; the repo also vendors a subset under ./robustbench
+
+# Config
+yacs
+iopath
+
+# I/O
+numpy>=1.24
+Pillow>=10.0
+packaging
+
+# Optional — only required for streaming-mode ImageNet loading
+webdataset>=0.2
